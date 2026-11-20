@@ -10,10 +10,9 @@ Needs Firefox 140 or later and Python 3.11 or later, with nothing beyond the sta
 
 ```sh
 make install   # tabctl and tabctl-native-host in ~/.local/bin, and Firefox's native host manifest
-make xpi       # the extension, as dist/tabctl.xpi
 ```
 
-Then, once, in Firefox: open about:addons, choose Install Add-on From File… in the gear menu and pick `dist/tabctl.xpi`. The XPI is not signed, so this works only where Firefox takes unsigned add-ons: Developer Edition, Nightly or ESR, with `xpinstall.signatures.required` set to false in about:config. `make install` writes `~/.mozilla/native-messaging-hosts/dev.jaeho.tabctl.json`, which tells Firefox where `tabctl-native-host` is; Firefox reads it from there even when its profiles live under `~/.config/mozilla`.
+Then, once, install the extension: download `tabctl-X.Y.Z.xpi` from the [latest release](https://github.com/jaehho/tabctl/releases/latest), open about:addons in Firefox, choose Install Add-on From File… in the gear menu and pick it. Mozilla signs it, so any Firefox takes it, and Firefox updates it by itself from then on: it checks `updates.json` in this repository once a day (about:addons, gear menu, Check for Updates does it now). `make install` writes `~/.mozilla/native-messaging-hosts/dev.jaeho.tabctl.json`, which tells Firefox where `tabctl-native-host` is; Firefox reads it from there even when its profiles live under `~/.config/mozilla`.
 
 `tabctl` runs this checkout as it is, so a `git pull` or a merge takes effect at the next call. `TABCTL_SRC` points it at another tree.
 
@@ -69,6 +68,25 @@ urls = ["https://docs.*", "https://*.readthedocs.io/*"]
 When the extension starts it connects to the native host `dev.jaeho.tabctl` (`tabctl native-host`, `src/tabctl/host.py`), which Firefox starts and keeps while the connection is open, and reconnects with a growing delay if it closes. The host listens on `$XDG_RUNTIME_DIR/tabctl/host.sock`, readable by this user only. Each `tabctl` call sends one JSON request line there; the host passes it to the extension (`extension/background.js`) with an id and returns the extension's reply. Replies wait up to 4 s, and the command up to 6 s.
 
 Only one host runs per user: a second Firefox profile with the extension gets no host of its own.
+
+## Releasing
+
+Mozilla signs each version for self-distribution (AMO's unlisted channel), and the release on GitHub carries the signed XPI. The AMO API credentials, made at <https://addons.mozilla.org/developers/addon/api/key/>, live in the Secret Service; store them once from a terminal (each command prompts for the value):
+
+```sh
+secret-tool store --label='tabctl AMO JWT issuer' service tabctl-amo key jwt-issuer
+secret-tool store --label='tabctl AMO JWT secret' service tabctl-amo key jwt-secret
+```
+
+Then, from a clean `main` that matches GitHub:
+
+```sh
+make release VERSION=0.3.1
+```
+
+It runs the tests and lint, writes the version into `extension/manifest.json`, `pyproject.toml` and the package, has AMO sign the extension (it waits up to 15 minutes; Mozilla says signing can take up to 24 hours), adds the signed XPI to `updates.json` with its SHA-256, commits and tags `v0.3.1`, publishes the GitHub release, and pushes `main` last, so `updates.json` never names an XPI that is not up yet. If signing fails the version files go back as they were. If AMO took the upload but signing outlasted the wait, download the signed XPI from AMO's developer hub once it is ready and run `scripts/release 0.3.1 --signed-xpi PATH`.
+
+`make xpi` builds the extension unsigned, as `dist/tabctl.xpi`, for trying a change in a Firefox that takes unsigned add-ons (Developer Edition, Nightly or ESR, with `xpinstall.signatures.required` set to false).
 
 ## Development
 

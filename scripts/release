@@ -1,0 +1,229 @@
+#!/usr/bin/python3 -I
+"""Sign tabctl's extension through AMO and publish it on GitHub.
+
+Usage: scripts/release VERSION [--signed-xpi PATH]
+
+Run from a clean main that matches origin. It writes VERSION into the
+manifest, pyproject.toml and the package, has AMO sign the extension
+for self-distribution (the unlisted channel), lists the signed XPI in
+updates.json, which installed copies poll through the manifest's
+update_url, then commits, tags vVERSION, pushes the tag, publishes the
+GitHub release with the XPI, and pushes main last, so updates.json
+never names a file that is not there yet.
+
+The AMO credentials come from the Secret Service (see README,
+Releasing). --signed-xpi skips signing and publishes an XPI that AMO
+already signed for VERSION, as when a signing run timed out after the
+upload went through.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REPO = "jaehho/tabctl"
+WEB_EXT = "web-ext@10.8.0"
+APPROVAL_TIMEOUT_MS = 15 * 60 * 1000
+VERSION_PATTERNS = {
+    "extension/manifest.json": '"version": "{}"',
+    "pyproject.toml": 'version = "{}"',
+    "src/tabctl/__init__.py": '__version__ = "{}"',
+}
+SECRETS = {
+    "WEB_EXT_API_KEY": "jwt-issuer",
+    "WEB_EXT_API_SECRET": "jwt-secret",
+}
+
+
+class ReleaseError(Exception):
+    """A precondition or step that stops the release."""
+
+
+def parse_version(text: str) -> tuple[int, int, int]:
+    """X.Y.Z as numbers; ValueError for anything else."""
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", text)
+    if match is None:
+        raise ValueError(f"not a version X.Y.Z: {text}")
+    major, minor, patch = (int(g) for g in match.groups())
+    return major, minor, patch
+
+
+def read_version(root: Path) -> str:
+    """The version the package says it is."""
+    text = (root / "src/tabctl/__init__.py").read_text()
+    return re.search(r'__version__ = "([^"]+)"', text)[1]
+
+
+def bump_versions(root: Path, old: str, new: str) -> dict[Path, str]:
+    """Write new over old in each version file; their old contents."""
+    originals = {}
+    for name, pattern in VERSION_PATTERNS.items():
+        path = root / name
+        text = path.read_text()
+        if text.count(pattern.format(old)) != 1:
+            raise ReleaseError(f"{name}: no single {pattern.format(old)}")
+        originals[path] = text
+        path.write_text(text.replace(pattern.format(old), pattern.format(new)))
+    return originals
+
+
+def add_update(updates: dict, addon_id: str, entry: dict) -> dict:
+    """updates.json's content with entry listed last for addon_id."""
+    addons = dict(updates.get("addons", {}))
+    listed = list(addons.get(addon_id, {}).get("updates", []))
+    addons[addon_id] = {"updates": [*listed, entry]}
+    return {**updates, "addons": addons}
+
+
+def git(*args: str, root: Path = ROOT) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+def check_clean_main(root: Path) -> None:
+    if git("branch", "--show-current", root=root) != "main":
+        raise ReleaseError("release from main")
+    if git("status", "--porcelain", root=root):
+        raise ReleaseError("commit or stash your changes first")
+    git("fetch", "-q", "origin", root=root)
+    if git("rev-parse", "HEAD", root=root) != git(
+        "rev-parse", "origin/main", root=root
+    ):
+        raise ReleaseError("main and origin/main differ: pull or push first")
+
+
+def read_credentials() -> dict[str, str]:
+    """web-ext's API key and secret, from the Secret Service."""
+    found = {}
+    for variable, key in SECRETS.items():
+        out = subprocess.run(
+            ["secret-tool", "lookup", "service", "tabctl-amo", "key", key],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            raise ReleaseError(
+                f"no AMO {key} in the Secret Service (see README, Releasing)"
+            )
+        found[variable] = out.stdout.strip()
+    return found
+
+
+def sign_extension(root: Path, credentials: dict[str, str]) -> Path:
+    """Have AMO sign extension/ on the unlisted channel; the XPI."""
+    artifacts = Path(tempfile.mkdtemp(prefix="tabctl-sign-"))
+    subprocess.run(
+        [
+            "npx",
+            "-y",
+            WEB_EXT,
+            "sign",
+            "--channel",
+            "unlisted",
+            "--source-dir",
+            str(root / "extension"),
+            "--artifacts-dir",
+            str(artifacts),
+            "--approval-timeout",
+            str(APPROVAL_TIMEOUT_MS),
+        ],
+        env={**os.environ, **credentials},
+        check=True,
+    )
+    signed = sorted(artifacts.glob("*.xpi"))
+    if len(signed) != 1:
+        raise ReleaseError(f"expected one signed XPI in {artifacts}")
+    return signed[0]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="release")
+    parser.add_argument("version")
+    parser.add_argument("--signed-xpi", type=Path)
+    args = parser.parse_args()
+
+    old = read_version(ROOT)
+    if parse_version(args.version) <= parse_version(old):
+        raise ReleaseError(f"{args.version} is not above {old}")
+    check_clean_main(ROOT)
+    subprocess.run(["gh", "auth", "status"], capture_output=True, check=True)
+    credentials = None if args.signed_xpi else read_credentials()
+
+    lock = ROOT / "uv.lock"
+    originals = {lock: lock.read_text()}
+    originals |= bump_versions(ROOT, old, args.version)
+    try:
+        subprocess.run(["uv", "lock", "-q"], cwd=ROOT, check=True)
+        signed = args.signed_xpi or sign_extension(ROOT, credentials)
+    except BaseException:
+        for path, text in originals.items():
+            path.write_text(text)
+        raise
+
+    xpi = ROOT / "dist" / f"tabctl-{args.version}.xpi"
+    xpi.parent.mkdir(exist_ok=True)
+    shutil.copyfile(signed, xpi)
+    digest = hashlib.sha256(xpi.read_bytes()).hexdigest()
+    tag = f"v{args.version}"
+    manifest = json.loads((ROOT / "extension/manifest.json").read_text())
+    updates_path = ROOT / "updates.json"
+    updates = add_update(
+        json.loads(updates_path.read_text()),
+        manifest["browser_specific_settings"]["gecko"]["id"],
+        {
+            "version": args.version,
+            "update_link": f"https://github.com/{REPO}/releases/download/"
+            f"{tag}/{xpi.name}",
+            "update_hash": f"sha256:{digest}",
+        },
+    )
+    updates_path.write_text(json.dumps(updates, indent=2) + "\n")
+
+    git("add", *VERSION_PATTERNS, "uv.lock", "updates.json")
+    git("commit", "-q", "-m", f"chore(release): {args.version}")
+    git("tag", "-a", tag, "-m", f"tabctl {args.version}")
+    git("push", "-q", "origin", tag)
+    subprocess.run(
+        [
+            "gh",
+            "release",
+            "create",
+            tag,
+            str(xpi),
+            "--repo",
+            REPO,
+            "--verify-tag",
+            "--title",
+            f"tabctl {args.version}",
+            "--generate-notes",
+        ],
+        check=True,
+    )
+    git("push", "-q", "origin", "main")
+    print(f"released {tag}: {xpi.name}, sha256 {digest}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ReleaseError, ValueError) as error:
+        print(f"release: {error}", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError as error:
+        print(f"release: {error}", file=sys.stderr)
+        sys.exit(1)

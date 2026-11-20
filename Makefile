@@ -1,12 +1,12 @@
 # tabctl - list, focus, open and group Firefox tabs from the command line.
 
-.PHONY: help run test check-firefox lint fmt xpi install uninstall package clean
+.PHONY: help run test check-firefox lint fmt xpi release install uninstall package clean
 
 PREFIX       ?= $(HOME)/.local
 # Firefox reads a user's native messaging hosts only from here, though
 # its profiles now live under ~/.config/mozilla.
 NATIVE_HOSTS ?= $(HOME)/.mozilla/native-messaging-hosts
-PY_FILES     := src tests scripts/check-firefox
+PY_FILES     := src tests scripts/check-firefox scripts/release
 
 help:            ## this list
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t16
@@ -27,10 +27,14 @@ lint:            ## ruff
 fmt:             ## ruff format
 	uv run ruff format $(PY_FILES)
 
-xpi:             ## the extension -> dist/tabctl.xpi, for about:addons
+xpi:             ## the extension unsigned -> dist/tabctl.xpi, for Firefox that takes unsigned add-ons
 	mkdir -p dist
 	rm -f dist/tabctl.xpi
 	cd extension && zip -q -r -X ../dist/tabctl.xpi .
+
+release: test lint  ## sign through AMO and publish on GitHub: make release VERSION=X.Y.Z (README, Releasing)
+	@test -n "$(VERSION)" || { echo "give VERSION=X.Y.Z" >&2; exit 2; }
+	scripts/release $(VERSION)
 
 install:         ## tabctl and Firefox's native host in ~/.local (no sudo); the extension is installed in Firefox by hand
 	# One script, two names. @ROOT@ becomes the checkout that installed it.
