@@ -44,8 +44,8 @@ class Host(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        # Cleanups run last first: kill, then wait.
-        self.addCleanup(host.wait)
+        # Cleanups run last first: kill, then close the pipes and wait.
+        self.addCleanup(host.__exit__, None, None, None)
         self.addCleanup(host.kill)
         return host
 
