@@ -1,7 +1,13 @@
 {
   "addons": {
     "tabctl@jaeho.dev": {
-      "updates": []
+      "updates": [
+        {
+          "version": "0.3.0",
+          "update_link": "https://github.com/jaehho/tabctl/releases/download/v0.3.0/tabctl-0.3.0.xpi",
+          "update_hash": "sha256:2dedd0b1d2b89868e18bcdda219430d64637e40fdcf31cdf0e598b70d9c1e827"
+        }
+      ]
     }
   }
 }

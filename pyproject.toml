@@ -1,6 +1,6 @@
 [project]
 name = "tabctl"
-version = "0.2.0"
+version = "0.3.0"
 description = "List, focus, open and group Firefox tabs from the command line"
 readme = "README.md"
 license = "MIT"
