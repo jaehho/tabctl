@@ -42,6 +42,7 @@ class Tab:
     title: str
     active: bool
     pinned: bool
+    last_accessed: int = 0  # ms since the epoch
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,8 @@ def parse_listing(raw: dict) -> Listing:
                 title=t["title"],
                 active=t["active"],
                 pinned=t["pinned"],
+                # Not sent by extension 0.1.0.
+                last_accessed=t.get("lastAccessed", 0),
             )
             for t in raw["tabs"]
         ),

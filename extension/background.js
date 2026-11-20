@@ -40,6 +40,7 @@ const HANDLERS = {
   open: openUrl,
   group: groupTabs,
   ungroup: ({ tabIds }) => browser.tabs.ungroup(tabIds).then(() => null),
+  close: ({ tabIds }) => browser.tabs.remove(tabIds).then(() => null),
   "edit-group": ({ groupId, ...properties }) =>
     browser.tabGroups.update(groupId, defined(properties)).then(describeGroup),
 };
@@ -64,22 +65,18 @@ async function listAll() {
 // The tab showing url, brought forward, or a new one in the window
 // focused last. With matchParams, a tab matches on the origin, the path
 // and those query parameters, so a page that rewrites the rest of its
-// address (or adds a #fragment) is still found; without, on the whole
-// address less its fragment.
-async function openUrl({ url, matchParams = [] }) {
-  const want = new URL(url);
+// address is still found; without, on the whole address. Either way the
+// #fragment does not count, and localhost is 127.0.0.1. newTab skips
+// the search.
+async function openUrl({ url, matchParams = [], newTab = false }) {
+  const want = samePage(url);
   const same = (address) => {
-    let have;
-    try {
-      have = new URL(address);
-    } catch {
+    const have = samePage(address);
+    if (have === null) {
       return false;
     }
     if (matchParams.length === 0) {
-      have.hash = "";
-      const bare = new URL(want);
-      bare.hash = "";
-      return have.href === bare.href;
+      return have.href === want.href;
     }
     return (
       have.origin === want.origin &&
@@ -89,7 +86,9 @@ async function openUrl({ url, matchParams = [] }) {
       )
     );
   };
-  const found = (await browser.tabs.query({})).find((tab) => same(tab.url));
+  const found = newTab
+    ? undefined
+    : (await browser.tabs.query({})).find((tab) => same(tab.url));
   if (found) {
     await browser.tabs.update(found.id, { active: true });
     await browser.windows.update(found.windowId, { focused: true });
@@ -108,12 +107,20 @@ async function openUrl({ url, matchParams = [] }) {
   return { tab: describeTab(tab), created: true };
 }
 
-// Into groupId, or a new group in windowId with these properties.
+// Into groupId, or a new group with these properties in windowId, by
+// default the first tab's window (Firefox's default is the window
+// focused last, which would carry the tabs off to it).
 async function groupTabs({ tabIds, groupId, windowId, ...properties }) {
+  const ids = [tabIds].flat();
   const options =
     groupId === undefined
-      ? { tabIds, createProperties: defined({ windowId }) }
-      : { tabIds, groupId };
+      ? {
+          tabIds: ids,
+          createProperties: {
+            windowId: windowId ?? (await browser.tabs.get(ids[0])).windowId,
+          },
+        }
+      : { tabIds: ids, groupId };
   const id = await browser.tabs.group(options);
   const looks = defined(properties);
   const group =
@@ -133,6 +140,7 @@ function describeTab(t) {
     title: t.title ?? "",
     active: t.active,
     pinned: t.pinned,
+    lastAccessed: t.lastAccessed ?? 0,
   };
 }
 
@@ -144,6 +152,24 @@ function describeGroup(g) {
     color: g.color,
     collapsed: g.collapsed,
   };
+}
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
+
+// address as a URL less its #fragment, with a loopback host written
+// 127.0.0.1; null when it is no URL.
+function samePage(address) {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return null;
+  }
+  if (LOOPBACK.has(url.hostname)) {
+    url.hostname = "127.0.0.1";
+  }
+  url.hash = "";
+  return url;
 }
 
 function defined(object) {

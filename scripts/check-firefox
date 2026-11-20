@@ -140,7 +140,15 @@ def run_checks(env: dict, base: str) -> None:
     sock = Path(env["XDG_RUNTIME_DIR"]) / "tabctl" / "host.sock"
     wait_for("the host's socket", sock.exists)
     print("ok: Firefox started the host")
+    check_open(env, base)
+    b, _ = check_groups(env, base)
+    check_rules(env, base)
+    check_close_and_dedupe(env, base, b)
+    check_idle(env)
+    print(tabctl(env, "ls"))
 
+
+def check_open(env: dict, base: str) -> None:
     first = tabctl(
         env, "open", f"{base}/nb?file=a.py&show-code=true", "--json"
     )
@@ -158,10 +166,22 @@ def run_checks(env: dict, base: str) -> None:
         "--json",
     )
     assert not loose["created"] and loose["tab"]["id"] == first["tab"]["id"]
+    local = base.replace("127.0.0.1", "localhost")
+    same_host = tabctl(
+        env, "open", f"{local}/nb?file=a.py&show-code=true", "--json"
+    )
+    assert not same_host["created"], same_host
+    assert same_host["tab"]["id"] == first["tab"]["id"], same_host
     other = tabctl(env, "open", f"{base}/nb?file=b.py", "--json")
     assert other["created"], other
-    print("ok: open focuses a matching tab, by address or --match-param")
+    print(
+        "ok: open focuses a matching tab, by address or --match-param, "
+        "with localhost as 127.0.0.1"
+    )
 
+
+def check_groups(env: dict, base: str) -> tuple[int, int]:
+    """Group two new tabs and take them out again; their ids."""
     b = tabctl(env, "open", f"{base}/docs/b", "--json")["tab"]["id"]
     c = tabctl(env, "open", f"{base}/docs/c", "--json")["tab"]["id"]
     group = tabctl(
@@ -189,7 +209,10 @@ def run_checks(env: dict, base: str) -> None:
     listing = tabctl(env, "ls", "--json")
     assert all(t["groupId"] == -1 for t in listing["tabs"]), listing
     print("ok: group, edit-group, ls and ungroup")
+    return b, c
 
+
+def check_rules(env: dict, base: str) -> None:
     rules = Path(env["XDG_CONFIG_HOME"]) / "tabctl" / "groups.toml"
     rules.parent.mkdir(parents=True)
     rules.write_text(
@@ -215,6 +238,26 @@ def run_checks(env: dict, base: str) -> None:
         "ok: apply sorts tabs into the rules' groups, then has nothing to do"
     )
 
+
+def check_close_and_dedupe(env: dict, base: str, b: int) -> None:
+    """Close a tab, then dedupe a second copy of grouped tab b."""
+    twin = tabctl(env, "open", f"{base}/docs/b", "--new", "--json")
+    assert twin["created"], twin
+    gone = tabctl(env, "open", f"{base}/gone", "--json")["tab"]["id"]
+    tabctl(env, "close", str(gone))
+    ids = {t["id"] for t in tabctl(env, "ls", "--json")["tabs"]}
+    assert gone not in ids, ids
+    plan = tabctl(env, "dedupe", "--dry-run", "--json")
+    closing = [c["tabId"] for c in plan["closures"]]
+    assert not plan["applied"] and closing == [b], plan
+    tabctl(env, "dedupe")
+    ids = {t["id"] for t in tabctl(env, "ls", "--json")["tabs"]}
+    assert b not in ids and twin["tab"]["id"] in ids, ids
+    assert tabctl(env, "dedupe") == "no duplicates"
+    print("ok: close, and dedupe keeps the active tab")
+
+
+def check_idle(env: dict) -> None:
     hosts = find_hosts(env)
     assert len(hosts) == 1, hosts
     time.sleep(IDLE_MS / 1000 * 10)
@@ -224,7 +267,6 @@ def run_checks(env: dict, base: str) -> None:
         f"ok: the same host answers after {IDLE_MS * 10} ms idle, "
         f"with Firefox's idle timeout for backgrounds at {IDLE_MS} ms"
     )
-    print(tabctl(env, "ls"))
 
 
 def main() -> int:

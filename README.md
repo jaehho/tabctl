@@ -1,6 +1,6 @@
 # tabctl
 
-List, focus, open and group Firefox tabs from the command line, and sort tabs into tab groups by rules.
+List, focus, open, close and group Firefox tabs from the command line, sort tabs into tab groups by rules, and close duplicate tabs.
 
 A Firefox extension keeps a connection open to a small native host, and the `tabctl` command reaches the host over a Unix socket. The extension carries out each request with Firefox's `tabs` and `tabGroups` APIs, so it works on the Firefox you have open, with its real tab groups.
 
@@ -23,21 +23,27 @@ Then, once, in Firefox: open about:addons, choose Install Add-on From File… in
 tabctl ls                                  # windows, groups and tabs, with tab and group ids
 tabctl open URL                            # bring forward the tab showing URL, or open it in a new tab
 tabctl open URL --match-param file         # ... matching on origin, path and the `file` query parameter
+tabctl open URL --new                      # always a new tab
 tabctl group 12 14 --title docs --color green
 tabctl group 15 --into 1795208833552005    # into an existing group
 tabctl ungroup 12 14
 tabctl edit-group 1795208833552005 --collapsed
+tabctl close 12 14
+tabctl dedupe --dry-run                    # which duplicate tabs it would close
+tabctl dedupe
 tabctl apply --dry-run                     # what the rules file would change
 tabctl apply
 ```
 
-Colors are blue, cyan, grey, green, orange, pink, purple, red and yellow. Every command takes `--json` and prints Firefox's own records: tabs have `id`, `windowId`, `index`, `groupId` (-1 when in no group), `url`, `title`, `active` and `pinned`; groups have `id`, `windowId`, `title`, `color` and `collapsed`. For example, to group every GitHub tab:
+Colors are blue, cyan, grey, green, orange, pink, purple, red and yellow. Every command takes `--json` and prints Firefox's own records: tabs have `id`, `windowId`, `index`, `groupId` (-1 when in no group), `url`, `title`, `active`, `pinned` and `lastAccessed` (ms since the epoch); groups have `id`, `windowId`, `title`, `color` and `collapsed`. For example, to group every GitHub tab:
 
 ```sh
 tabctl ls --json | jq '.tabs[] | select(.url | startswith("https://github.com/")) | .id' | xargs tabctl group --title github --color purple
 ```
 
-`open` without `--match-param` matches a tab on its whole address, less any `#fragment`. With it, a page that rewrites the rest of its address is still found: a marimo notebook is the same notebook whatever its other query parameters.
+`open` without `--match-param` matches a tab on its whole address. With it, a page that rewrites the rest of its address is still found: a marimo notebook is the same notebook whatever its other query parameters. Either way the `#fragment` does not count, and `localhost` and `127.0.0.1` are the same host.
+
+`dedupe` closes every tab that shows the same page as another (the same address less its `#fragment`, `localhost` taken as `127.0.0.1`, private and normal windows apart). Of each set it keeps a pinned tab, else the active one, else one in a group, else the one used last, and it never closes a pinned tab. Closed tabs come back from History, Recently Closed Tabs.
 
 ### Rules
 

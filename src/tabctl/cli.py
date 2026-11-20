@@ -9,6 +9,7 @@ from pathlib import Path
 
 from tabctl import __version__
 from tabctl.client import TabctlError, find_socket, send_request
+from tabctl.dedupe import plan_closures
 from tabctl.host import HostRunningError, run_host
 from tabctl.model import (
     COLORS,
@@ -52,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="match a tab on origin, path and this query parameter "
         "(repeatable) instead of the whole address",
     )
+    open_.add_argument(
+        "--new", action="store_true", help="always open a new tab"
+    )
     add_json(open_)
 
     group = sub.add_parser(
@@ -64,6 +68,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     ungroup = sub.add_parser("ungroup", help="take tabs out of their groups")
     ungroup.add_argument("tab_ids", type=int, nargs="+", metavar="TAB_ID")
+
+    close = sub.add_parser("close", help="close tabs")
+    close.add_argument("tab_ids", type=int, nargs="+", metavar="TAB_ID")
+
+    dedupe = sub.add_parser(
+        "dedupe",
+        help="close tabs showing the same page as another, keeping one",
+    )
+    dedupe.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="only say what it would do",
+    )
+    add_json(dedupe)
 
     edit = sub.add_parser(
         "edit-group", help="change a group's title, color or collapse"
@@ -148,7 +167,12 @@ def run_command(args: argparse.Namespace, socket_path: Path) -> int:
         emit(args, raw, format_listing(parse_listing(raw)))
     elif args.command == "open":
         result = ask(
-            "open", {"url": args.url, "matchParams": args.match_param}
+            "open",
+            {
+                "url": args.url,
+                "matchParams": args.match_param,
+                "newTab": args.new,
+            },
         )
         verb = "opened" if result["created"] else "focused"
         emit(args, result, f"{verb} tab {result['tab']['id']}")
@@ -160,6 +184,10 @@ def run_command(args: argparse.Namespace, socket_path: Path) -> int:
         emit(args, group, format_group(parse_group(group)))
     elif args.command == "ungroup":
         ask("ungroup", {"tabIds": args.tab_ids})
+    elif args.command == "close":
+        ask("close", {"tabIds": args.tab_ids})
+    elif args.command == "dedupe":
+        return close_duplicates(args, ask)
     elif args.command == "edit-group":
         group = ask(
             "edit-group", {"groupId": args.group_id, **looks_args(args)}
@@ -186,6 +214,27 @@ def apply_rules(args: argparse.Namespace, ask) -> int:
     }
     text = "\n".join(lines) if lines else "nothing to do"
     emit(args, record, text)
+    return 0
+
+
+def close_duplicates(args: argparse.Namespace, ask) -> int:
+    listing = parse_listing(ask("list", {}))
+    closures = plan_closures(listing)
+    if closures and not args.dry_run:
+        ask("close", {"tabIds": [c.tab_id for c in closures]})
+    tabs = {t.id: t for t in listing.tabs}
+    lines = [
+        f"close {c.tab_id:>4} (keeping {c.kept_id}) "
+        f"{tabs[c.tab_id].title}  {tabs[c.tab_id].url}"
+        for c in closures
+    ]
+    record = {
+        "applied": not args.dry_run,
+        "closures": [
+            {"tabId": c.tab_id, "keptId": c.kept_id} for c in closures
+        ],
+    }
+    emit(args, record, "\n".join(lines) if lines else "no duplicates")
     return 0
 
 
