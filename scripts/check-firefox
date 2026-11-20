@@ -1,0 +1,277 @@
+#!/usr/bin/python3 -I
+"""Drive tabctl against a headless Firefox with a scratch profile.
+
+Nothing here reaches the user's Firefox or desktop: Firefox runs with
+its own HOME (where it reads native host manifests), profile, runtime
+directory (where the host's socket lives) and no display or session
+bus. The extension loads unpacked from extension/ through a proxy file
+in the profile, and the host is this checkout's scripts/tabctl-live.
+
+Usage: scripts/check-firefox [--keep]   (--keep leaves the scratch dir)
+"""
+
+import http.server
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+FIREFOX = shutil.which("firefox-developer-edition") or shutil.which("firefox")
+IDLE_MS = 2000
+PREFS = {
+    "xpinstall.signatures.required": False,
+    "extensions.autoDisableScopes": 0,
+    "extensions.enabledScopes": 15,
+    "extensions.background.idle.timeout": IDLE_MS,
+    "browser.shell.checkDefaultBrowser": False,
+    "browser.startup.page": 0,
+    "browser.startup.homepage_override.mstone": "ignore",
+    "datareporting.policy.dataSubmissionEnabled": False,
+    "toolkit.telemetry.reportingpolicy.firstRun": False,
+    "app.update.disabledForTesting": True,
+    "browser.tabs.groups.enabled": True,
+}
+
+
+class Page(http.server.BaseHTTPRequestHandler):
+    """Any path: a page titled with that path."""
+
+    def do_GET(self):
+        body = f"<title>{self.path}</title>{self.path}".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        pass
+
+
+def write_profile(scratch: Path) -> dict:
+    """Profile, HOME and runtime dir for a scratch Firefox; its env."""
+    home, run, config = scratch / "home", scratch / "run", scratch / "config"
+    profile = scratch / "profile"
+    for d in (home, run, config, profile / "extensions"):
+        d.mkdir(parents=True, mode=0o700)
+    (profile / "user.js").write_text(
+        "".join(
+            f"user_pref({json.dumps(k)}, {json.dumps(v)});\n"
+            for k, v in PREFS.items()
+        )
+    )
+    (profile / "extensions" / "tabctl@jaeho.dev").write_text(
+        str(ROOT / "extension")
+    )
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir()
+    host = bin_dir / "tabctl-native-host"
+    host.symlink_to(ROOT / "scripts" / "tabctl-live")
+    manifest = json.loads(
+        (ROOT / "packaging" / "dev.jaeho.tabctl.json").read_text()
+    )
+    manifest["path"] = str(host)
+    hosts = home / ".mozilla" / "native-messaging-hosts"
+    hosts.mkdir(parents=True)
+    (hosts / "dev.jaeho.tabctl.json").write_text(json.dumps(manifest))
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS")
+    }
+    env.update(
+        HOME=str(home),
+        XDG_RUNTIME_DIR=str(run),
+        XDG_CONFIG_HOME=str(config),
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent/bus",
+        MOZ_HEADLESS="1",
+        TABCTL_SRC=str(ROOT),
+    )
+    return env
+
+
+def tabctl(env: dict, *args: str) -> dict | list | str:
+    """Run the launcher; its output, parsed when --json is given."""
+    out = subprocess.run(
+        [ROOT / "scripts" / "tabctl-live", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if out.returncode != 0:
+        raise AssertionError(f"tabctl {' '.join(args)}: {out.stderr}")
+    text = out.stdout.strip()
+    return json.loads(text) if "--json" in args else text
+
+
+def find_hosts(env: dict) -> set[int]:
+    """PIDs of native hosts this scratch Firefox started."""
+    home = env["HOME"]
+    pids = set()
+    for proc in Path("/proc").iterdir():
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+        except (OSError, ValueError):
+            continue
+        if b"native-host" in argv and any(home.encode() in a for a in argv):
+            pids.add(int(proc.name))
+    return pids
+
+
+def wait_for(what: str, check, timeout: float = 30) -> None:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if check():
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def run_checks(env: dict, base: str) -> None:
+    sock = Path(env["XDG_RUNTIME_DIR"]) / "tabctl" / "host.sock"
+    wait_for("the host's socket", sock.exists)
+    print("ok: Firefox started the host")
+
+    first = tabctl(
+        env, "open", f"{base}/nb?file=a.py&show-code=true", "--json"
+    )
+    assert first["created"], first
+    again = tabctl(
+        env, "open", f"{base}/nb?file=a.py&show-code=true", "--json"
+    )
+    assert not again["created"] and again["tab"]["id"] == first["tab"]["id"]
+    loose = tabctl(
+        env,
+        "open",
+        f"{base}/nb?show-code=false&file=a.py#cell",
+        "--match-param",
+        "file",
+        "--json",
+    )
+    assert not loose["created"] and loose["tab"]["id"] == first["tab"]["id"]
+    other = tabctl(env, "open", f"{base}/nb?file=b.py", "--json")
+    assert other["created"], other
+    print("ok: open focuses a matching tab, by address or --match-param")
+
+    b = tabctl(env, "open", f"{base}/docs/b", "--json")["tab"]["id"]
+    c = tabctl(env, "open", f"{base}/docs/c", "--json")["tab"]["id"]
+    group = tabctl(
+        env,
+        "group",
+        str(b),
+        str(c),
+        "--title",
+        "docs",
+        "--color",
+        "red",
+        "--json",
+    )
+    assert (group["title"], group["color"]) == ("docs", "red"), group
+    folded = tabctl(
+        env, "edit-group", str(group["id"]), "--collapsed", "--json"
+    )
+    assert folded["collapsed"], folded
+    listing = tabctl(env, "ls", "--json")
+    in_group = {
+        t["id"] for t in listing["tabs"] if t["groupId"] == group["id"]
+    }
+    assert in_group == {b, c}, listing
+    tabctl(env, "ungroup", str(b), str(c))
+    listing = tabctl(env, "ls", "--json")
+    assert all(t["groupId"] == -1 for t in listing["tabs"]), listing
+    print("ok: group, edit-group, ls and ungroup")
+
+    rules = Path(env["XDG_CONFIG_HOME"]) / "tabctl" / "groups.toml"
+    rules.parent.mkdir(parents=True)
+    rules.write_text(
+        '[[group]]\ntitle = "notebooks"\ncolor = "blue"\n'
+        f'urls = ["{base}/nb?*"]\n\n'
+        '[[group]]\ntitle = "docs"\ncolor = "green"\n'
+        f'urls = ["{base}/docs/*"]\n'
+    )
+    plan = tabctl(env, "apply", "--dry-run", "--json")
+    assert not plan["applied"] and len(plan["steps"]) == 2, plan
+    tabctl(env, "apply", "--json")
+    listing = tabctl(env, "ls", "--json")
+    titles = {g["id"]: g["title"] for g in listing["groups"]}
+    by_path = {
+        t["url"].removeprefix(base): titles.get(t["groupId"])
+        for t in listing["tabs"]
+    }
+    assert by_path["/nb?file=a.py&show-code=true"] == "notebooks", by_path
+    assert by_path["/nb?file=b.py"] == "notebooks", by_path
+    assert by_path["/docs/b"] == by_path["/docs/c"] == "docs", by_path
+    assert tabctl(env, "apply") == "nothing to do"
+    print(
+        "ok: apply sorts tabs into the rules' groups, then has nothing to do"
+    )
+
+    hosts = find_hosts(env)
+    assert len(hosts) == 1, hosts
+    time.sleep(IDLE_MS / 1000 * 10)
+    tabctl(env, "ls", "--json")
+    assert find_hosts(env) == hosts, (hosts, find_hosts(env))
+    print(
+        f"ok: the same host answers after {IDLE_MS * 10} ms idle, "
+        f"with Firefox's idle timeout for backgrounds at {IDLE_MS} ms"
+    )
+    print(tabctl(env, "ls"))
+
+
+def main() -> int:
+    if FIREFOX is None:
+        print("check-firefox: no firefox on PATH", file=sys.stderr)
+        return 1
+    keep = "--keep" in sys.argv[1:]
+    scratch = Path(tempfile.mkdtemp(prefix="tabctl-check-"))
+    env = write_profile(scratch)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    log = (scratch / "firefox.log").open("w")
+    firefox = subprocess.Popen(
+        [
+            FIREFOX,
+            "--headless",
+            "--no-remote",
+            "--profile",
+            str(scratch / "profile"),
+            "about:blank",
+        ],
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        run_checks(env, base)
+    except AssertionError as error:
+        print(f"FAIL: {error}\nFirefox's log: {scratch / 'firefox.log'}")
+        keep = True
+        return 1
+    finally:
+        os.killpg(firefox.pid, signal.SIGTERM)
+        firefox.wait(timeout=30)
+        server.shutdown()
+        sock = Path(env["XDG_RUNTIME_DIR"]) / "tabctl" / "host.sock"
+        if sock.exists():
+            print("note: the host's socket outlived Firefox")
+        if keep:
+            print(f"scratch kept: {scratch}")
+        else:
+            shutil.rmtree(scratch)
+    print("all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,41 @@
+#!/bin/sh
+# tabctl and tabctl-native-host from the working checkout. Installed by
+# `make install` under both names; Firefox starts the second for the
+# extension. TABCTL_SRC points at another tree.
+#
+# Rules this relies on:
+#   - the standard library only, so the system Python runs the tree as
+#     it is: no venv to build or keep in step
+#   - -I keeps the caller's directory and PYTHON* variables out
+#   - exec, so the app is this process (signals, one PID, exit status)
+set -eu
+
+# The checkout this was installed from. `make install` rewrites the
+# DEFAULT_ROOT line only; the @ROOT@ below stays a sentinel, so a run out
+# of scripts/ still recognizes an uninstalled copy.
+DEFAULT_ROOT="@ROOT@"
+if [ "$DEFAULT_ROOT" = "@ROOT@" ]; then
+  d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  if [ -f "$d/../src/tabctl/__init__.py" ]; then
+    DEFAULT_ROOT=$(CDPATH= cd -- "$d/.." && pwd)
+  else
+    DEFAULT_ROOT="${HOME}/projects/tabctl"
+  fi
+fi
+ROOT="${TABCTL_SRC:-$DEFAULT_ROOT}"
+
+if [ ! -f "$ROOT/src/tabctl/__init__.py" ]; then
+  echo "tabctl: no checkout at $ROOT (set TABCTL_SRC)" >&2
+  exit 1
+fi
+
+case "$(basename -- "$0")" in
+  tabctl-native-host) set -- native-host "$@" ;;
+esac
+
+exec /usr/bin/python3 -I -c '
+import sys
+sys.path.insert(0, sys.argv.pop(1))
+from tabctl.cli import main
+sys.exit(main(sys.argv[1:]))
+' "$ROOT/src" "$@"

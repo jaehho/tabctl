@@ -1,0 +1,7 @@
+{
+  "name": "dev.jaeho.tabctl",
+  "description": "tabctl: carries the tabctl command's requests to the Firefox extension",
+  "path": "tabctl-native-host",
+  "type": "stdio",
+  "allowed_extensions": ["tabctl@jaeho.dev"]
+}
