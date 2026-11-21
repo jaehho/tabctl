@@ -1,6 +1,6 @@
 # tabctl
 
-List, focus, open, close and group Firefox tabs from the command line, sort tabs into tab groups by rules, and close duplicate tabs.
+List, focus, open, close and group Firefox tabs from the command line, sort tabs into tab groups by rules, and close duplicate tabs or tabs you have not used for a while.
 
 A Firefox extension keeps a connection open to a small native host, and the `tabctl` command reaches the host over a Unix socket. The extension carries out each request with Firefox's `tabs` and `tabGroups` APIs, so it works on the Firefox you have open, with its real tab groups.
 
@@ -28,6 +28,8 @@ tabctl group 15 --into 1795208833552005    # into an existing group
 tabctl ungroup 12 14
 tabctl edit-group 1795208833552005 --collapsed
 tabctl close 12 14
+tabctl close --older-than 7d --dry-run     # which tabs you have not used for a week
+tabctl close --older-than 7d
 tabctl dedupe --dry-run                    # which duplicate tabs it would close
 tabctl dedupe
 tabctl apply --dry-run                     # what the rules file would change
@@ -41,6 +43,8 @@ tabctl ls --json | jq '.tabs[] | select(.url | startswith("https://github.com/")
 ```
 
 `open` without `--match-param` matches a tab on its whole address. With it, a page that rewrites the rest of its address is still found: a marimo notebook is the same notebook whatever its other query parameters. Either way the `#fragment` does not count, and `localhost` and `127.0.0.1` are the same host.
+
+`close --older-than AGE` closes every tab you have not used for AGE (`30m`, `12h`, `7d`, `2w`): Firefox counts a tab as used until you leave it, and a tab you never looked at from when it opened. The tab on show in each window is in use, and pinned tabs are never closed; tabs in groups are not spared, so pin what you want kept. With `--dry-run` it lists each tab with how long it has gone unused.
 
 `dedupe` closes every tab that shows the same page as another (the same address less its `#fragment`, `localhost` taken as `127.0.0.1`, private and normal windows apart). Of each set it keeps a pinned tab, else the active one, else one in a group, else the one used last, and it never closes a pinned tab. Closed tabs come back from History, Recently Closed Tabs.
 
