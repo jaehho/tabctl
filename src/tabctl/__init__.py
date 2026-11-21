@@ -1,3 +1,3 @@
 """List, focus, open and group Firefox tabs from the command line."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

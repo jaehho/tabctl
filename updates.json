@@ -6,6 +6,11 @@
           "version": "0.3.0",
           "update_link": "https://github.com/jaehho/tabctl/releases/download/v0.3.0/tabctl-0.3.0.xpi",
           "update_hash": "sha256:2dedd0b1d2b89868e18bcdda219430d64637e40fdcf31cdf0e598b70d9c1e827"
+        },
+        {
+          "version": "0.4.0",
+          "update_link": "https://github.com/jaehho/tabctl/releases/download/v0.4.0/tabctl-0.4.0.xpi",
+          "update_hash": "sha256:d8266e52b8eb942e79928e05d50aa2f79cfb9e4106c40f4bf72df8927e4e8c7f"
         }
       ]
     }
