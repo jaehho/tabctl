@@ -8,6 +8,7 @@ from tabctl.rules import (
     Rule,
     parse_rules,
     plan_steps,
+    plan_tab_steps,
     step_request,
 )
 
@@ -196,6 +197,43 @@ class StepRequest(unittest.TestCase):
                     "collapsed": None,
                 },
             ),
+        )
+
+
+class PlanTabSteps(unittest.TestCase):
+    def test_moves_only_the_tabs_named(self):
+        tabs = [
+            make_tab(1, "http://127.0.0.1:2718/?file=a.py"),
+            make_tab(2, "http://127.0.0.1:2718/?file=b.py"),
+        ]
+        steps = plan_tab_steps(make_listing(tabs), (NOTEBOOKS,), {2})
+        self.assertEqual(
+            steps,
+            (
+                NewGroup(
+                    tab_ids=(2,),
+                    window_id=1,
+                    title="notebooks",
+                    color="blue",
+                    collapsed=None,
+                ),
+            ),
+        )
+
+    def test_joins_the_group_without_recoloring_it(self):
+        group = Group(
+            id=9, window_id=1, title="notebooks", color="red", collapsed=False
+        )
+        tabs = [make_tab(1, "http://127.0.0.1:2718/?file=a.py")]
+        steps = plan_tab_steps(
+            make_listing(tabs, groups=[group]), (NOTEBOOKS,), {1}
+        )
+        self.assertEqual(steps, (JoinGroup(tab_ids=(1,), group_id=9),))
+
+    def test_nothing_for_a_tab_no_rule_matches(self):
+        tabs = [make_tab(1, "https://example.org/")]
+        self.assertEqual(
+            plan_tab_steps(make_listing(tabs), (NOTEBOOKS,), {1}), ()
         )
 
 

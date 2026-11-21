@@ -1,22 +1,40 @@
 // tabctl's background: holds a port to the native host (`tabctl
 // native-host`, src/tabctl/host.py) and answers each request it relays
-// from the command line with one reply, {id, ok, result | error}.
+// from the command line with one reply, {id, ok, result | error}. It
+// also tells the host when a tab's address changes, {event: "url",
+// tabId}, so the host can put the tab in its rule's group.
 "use strict";
 
 const HOST = "dev.jaeho.tabctl";
 const RETRY_MS = { first: 1000, max: 60000 };
 
 let retryMs = RETRY_MS.first;
+let port = null;
 
 function connect() {
-  const port = browser.runtime.connectNative(HOST);
-  port.onMessage.addListener((message) => receive(port, message));
-  port.onDisconnect.addListener((gone) => {
+  const native = browser.runtime.connectNative(HOST);
+  port = native;
+  native.onMessage.addListener((message) => receive(native, message));
+  native.onDisconnect.addListener((gone) => {
     console.warn("tabctl: host gone:", gone.error?.message ?? "closed");
+    if (port === native) {
+      port = null;
+    }
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, RETRY_MS.max);
   });
 }
+
+browser.tabs.onUpdated.addListener(
+  (tabId) => {
+    try {
+      port?.postMessage({ event: "url", tabId });
+    } catch (error) {
+      console.warn("tabctl: cannot tell the host:", error.message);
+    }
+  },
+  { properties: ["url"] },
+);
 
 async function receive(port, message) {
   if (message.hello !== undefined) {

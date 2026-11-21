@@ -25,13 +25,34 @@ def read_frame(stream) -> dict:
     return json.loads(stream.read(size))
 
 
+def send_frame(host: subprocess.Popen, message: dict) -> None:
+    host.stdin.write(encode_native(message))
+    host.stdin.flush()
+
+
+def make_raw_tab(tab_id: int, url: str) -> dict:
+    return {
+        "id": tab_id,
+        "windowId": 1,
+        "index": tab_id,
+        "groupId": -1,
+        "url": url,
+        "title": "",
+        "active": False,
+        "pinned": False,
+        "lastAccessed": 1,
+    }
+
+
 class Host(unittest.TestCase):
     def setUp(self):
         self.runtime = tempfile.TemporaryDirectory()
         self.addCleanup(self.runtime.cleanup)
+        self.rules = Path(self.runtime.name) / "config/tabctl/groups.toml"
         self.env = {
             **os.environ,
             "XDG_RUNTIME_DIR": self.runtime.name,
+            "XDG_CONFIG_HOME": str(self.rules.parent.parent),
             "PYTHONPATH": str(SRC),
         }
         self.sock = find_socket(self.env)
@@ -48,6 +69,10 @@ class Host(unittest.TestCase):
         self.addCleanup(host.__exit__, None, None, None)
         self.addCleanup(host.kill)
         return host
+
+    def write_rules(self, text: str) -> None:
+        self.rules.parent.mkdir(parents=True)
+        self.rules.write_text(text)
 
     def test_says_hello_then_relays_a_request_and_its_reply(self):
         host = self.start_host()
@@ -117,6 +142,51 @@ class Host(unittest.TestCase):
     def test_without_a_host_the_cli_says_firefox_is_not_connected(self):
         with self.assertRaisesRegex(TabctlError, "not connected"):
             send_request(self.sock, "list", {})
+
+    def test_puts_a_tab_whose_address_changed_in_its_rules_group(self):
+        self.write_rules(
+            '[[group]]\ntitle = "docs"\ncolor = "green"\n'
+            'urls = ["https://docs.*"]\n'
+        )
+        host = self.start_host()
+        read_frame(host.stdout)
+        send_frame(host, {"event": "url", "tabId": 7})
+        request = read_frame(host.stdout)
+        self.assertEqual(request["cmd"], "list")
+        listing = {
+            "windows": [{"id": 1, "focused": True, "incognito": False}],
+            "groups": [],
+            "tabs": [
+                make_raw_tab(7, "https://docs.python.org/"),
+                make_raw_tab(8, "https://docs.rs/"),
+            ],
+        }
+        send_frame(host, {"id": request["id"], "ok": True, "result": listing})
+        request = read_frame(host.stdout)
+        self.assertEqual(
+            (request["cmd"], request["args"]),
+            (
+                "group",
+                {
+                    "tabIds": [7],
+                    "windowId": 1,
+                    "title": "docs",
+                    "color": "green",
+                    "collapsed": None,
+                },
+            ),
+        )
+
+    def test_a_broken_rules_file_leaves_the_host_relaying(self):
+        self.write_rules("[[group]\n")
+        host = self.start_host()
+        read_frame(host.stdout)
+        send_frame(host, {"event": "url", "tabId": 7})
+        cli = threading.Thread(
+            target=send_request, args=(self.sock, "ls-probe", {}), daemon=True
+        )
+        cli.start()
+        self.assertEqual(read_frame(host.stdout)["cmd"], "ls-probe")
 
     def test_a_silent_extension_times_out(self):
         host = self.start_host()

@@ -5,6 +5,10 @@ port closes. Firefox and the host trade JSON objects, each behind its
 length as a 4-byte unsigned integer in native byte order. The CLI
 reaches the host through a Unix socket, one JSON object per line each
 way: {"cmd", "args"} in, {"ok", "result" | "error"} out.
+
+The extension also says when a tab's address changes, as {"event":
+"url", "tabId"}, and the host puts that tab in its rule's group, by
+the rules file as it is then.
 """
 
 import asyncio
@@ -18,6 +22,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from tabctl import __version__
+from tabctl.model import parse_listing
+from tabctl.rules import plan_tab_steps, read_rules, step_request
 
 LENGTH = struct.Struct("=I")
 REPLY_TIMEOUT_S = 4.0
@@ -25,6 +31,10 @@ REPLY_TIMEOUT_S = 4.0
 
 class HostRunningError(Exception):
     """Another live host already listens on the socket."""
+
+
+class ExtensionError(Exception):
+    """The extension answered a request with an error."""
 
 
 def encode_native(message: dict) -> bytes:
@@ -87,6 +97,55 @@ async def answer_request(relay: Relay, line: bytes, *, timeout: float):
     return {k: reply[k] for k in ("ok", "result", "error") if k in reply}
 
 
+async def ask_extension(
+    relay: Relay, command: str, args: dict, *, timeout: float
+):
+    """The result of one request; ExtensionError if it failed."""
+    reply = await relay.ask(command, args, timeout=timeout)
+    if not reply.get("ok"):
+        raise ExtensionError(reply.get("error", "no reason given"))
+    return reply.get("result")
+
+
+def take_event(message: dict, moved: asyncio.Queue) -> None:
+    """Queue the tab of a url event; ignore anything else."""
+    tab_id = message.get("tabId")
+    if message.get("event") == "url" and isinstance(tab_id, int):
+        moved.put_nowait(tab_id)
+
+
+async def group_tabs(
+    relay: Relay, tab_ids: set[int], rules_path: Path, *, timeout: float
+) -> None:
+    """Put these tabs in their rules' groups, if there are rules."""
+    if not rules_path.exists():
+        return
+    rules = read_rules(rules_path)
+    raw = await ask_extension(relay, "list", {}, timeout=timeout)
+    for step in plan_tab_steps(parse_listing(raw), rules, tab_ids):
+        await ask_extension(relay, *step_request(step), timeout=timeout)
+
+
+async def group_moved_tabs(
+    relay: Relay, moved: asyncio.Queue, rules_path: Path, *, timeout: float
+) -> None:
+    """Group the queued tabs, a batch at a time, for as long as it runs.
+
+    One batch at a time, so two tabs for a new group make one group.
+    """
+    while True:
+        tab_ids = {await moved.get()}
+        while not moved.empty():
+            tab_ids.add(moved.get_nowait())
+        try:
+            await group_tabs(relay, tab_ids, rules_path, timeout=timeout)
+        except (ExtensionError, OSError, TimeoutError, ValueError) as error:
+            sys.stderr.write(
+                f"tabctl native-host: grouping tabs {sorted(tab_ids)}: "
+                f"{error}\n"
+            )
+
+
 def claim_socket(path: Path) -> socket.socket:
     """A socket listening at path, for this user only.
 
@@ -111,8 +170,11 @@ def claim_socket(path: Path) -> socket.socket:
     return listener
 
 
-async def run_host(path: Path, *, timeout: float = REPLY_TIMEOUT_S) -> None:
-    """Relay requests on the socket at path until Firefox lets go."""
+async def run_host(
+    path: Path, *, rules_path: Path, timeout: float = REPLY_TIMEOUT_S
+) -> None:
+    """Relay requests on the socket at path until Firefox lets go, and
+    group tabs by the rules at rules_path as their addresses change."""
     loop = asyncio.get_running_loop()
     from_firefox = asyncio.StreamReader()
     await loop.connect_read_pipe(
@@ -124,6 +186,7 @@ async def run_host(path: Path, *, timeout: float = REPLY_TIMEOUT_S) -> None:
         sys.stdout.buffer.flush()
 
     relay = Relay(send)
+    moved: asyncio.Queue[int] = asyncio.Queue()
 
     async def serve(reader, writer):
         try:
@@ -134,12 +197,16 @@ async def run_host(path: Path, *, timeout: float = REPLY_TIMEOUT_S) -> None:
         finally:
             writer.close()
 
-    async def pass_replies():
+    async def read_firefox():
         while True:
             try:
-                relay.settle(await read_native(from_firefox))
+                message = await read_native(from_firefox)
             except asyncio.IncompleteReadError:
                 return
+            if "event" in message:
+                take_event(message, moved)
+            else:
+                relay.settle(message)
 
     server = await asyncio.start_unix_server(serve, sock=claim_socket(path))
     stop = asyncio.Event()
@@ -147,7 +214,10 @@ async def run_host(path: Path, *, timeout: float = REPLY_TIMEOUT_S) -> None:
         loop.add_signal_handler(signum, stop.set)
     send({"hello": __version__})
     tasks = {
-        asyncio.create_task(pass_replies()),
+        asyncio.create_task(read_firefox()),
+        asyncio.create_task(
+            group_moved_tabs(relay, moved, rules_path, timeout=timeout)
+        ),
         asyncio.create_task(stop.wait()),
     }
     try:

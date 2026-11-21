@@ -11,12 +11,14 @@ A rules file is TOML with one [[group]] table per rule:
 tab's whole address. A tab goes to the first rule it matches. Rules
 gather ungrouped, unpinned tabs into the group of that title in the
 tab's window, making it when there is none; a tab already in a group
-stays there.
+stays there. The host applies them to each tab whose address changes,
+and `tabctl apply` to every tab open.
 """
 
 import fnmatch
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from tabctl.model import COLORS, NO_GROUP, Group, Listing, Tab
@@ -60,6 +62,12 @@ class Recolor:
 
 
 Step = JoinGroup | NewGroup | Recolor
+
+
+def default_rules_path(environ: Mapping[str, str]) -> Path:
+    """$XDG_CONFIG_HOME/tabctl/groups.toml, or under ~/.config."""
+    config = environ.get("XDG_CONFIG_HOME") or Path("~/.config").expanduser()
+    return Path(config) / "tabctl" / "groups.toml"
 
 
 def parse_rules(document: dict) -> tuple[Rule, ...]:
@@ -130,6 +138,17 @@ def plan_steps(listing: Listing, rules: tuple[Rule, ...]) -> tuple[Step, ...]:
         groups = [g for g in listing.groups if g.window_id == window.id]
         steps += plan_window(window.id, tabs, groups, rules)
     return tuple(steps)
+
+
+def plan_tab_steps(
+    listing: Listing, rules: tuple[Rule, ...], tab_ids: Collection[int]
+) -> tuple[Step, ...]:
+    """plan_steps for these tabs alone, leaving group colors be."""
+    only = replace(
+        listing, tabs=tuple(t for t in listing.tabs if t.id in tab_ids)
+    )
+    steps = plan_steps(only, rules)
+    return tuple(s for s in steps if not isinstance(s, Recolor))
 
 
 def plan_window(
