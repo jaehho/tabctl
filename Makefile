@@ -30,7 +30,7 @@ fmt:             ## ruff format
 xpi:             ## the extension unsigned -> dist/tabctl.xpi, for Firefox that takes unsigned add-ons
 	mkdir -p dist
 	rm -f dist/tabctl.xpi
-	cd extension && zip -q -r -X ../dist/tabctl.xpi .
+	cd extension && zip -q -r -X ../dist/tabctl.xpi . -x '.*'
 
 release: test lint  ## sign through AMO and publish on GitHub: make release VERSION=X.Y.Z (README, Releasing)
 	@test -n "$(VERSION)" || { echo "give VERSION=X.Y.Z" >&2; exit 2; }
