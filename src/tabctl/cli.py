@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from tabctl import __version__
@@ -19,6 +20,7 @@ from tabctl.model import (
     parse_listing,
 )
 from tabctl.rules import describe_step, plan_steps, read_rules, step_request
+from tabctl.stale import find_stale_tabs, format_age, parse_age
 
 
 def default_rules_path(environ) -> Path:
@@ -69,19 +71,24 @@ def build_parser() -> argparse.ArgumentParser:
     ungroup = sub.add_parser("ungroup", help="take tabs out of their groups")
     ungroup.add_argument("tab_ids", type=int, nargs="+", metavar="TAB_ID")
 
-    close = sub.add_parser("close", help="close tabs")
-    close.add_argument("tab_ids", type=int, nargs="+", metavar="TAB_ID")
+    close = sub.add_parser(
+        "close", help="close tabs by id, or every tab unused for a while"
+    )
+    close.add_argument("tab_ids", type=int, nargs="*", metavar="TAB_ID")
+    close.add_argument(
+        "--older-than",
+        metavar="AGE",
+        help="instead of ids: every unpinned tab not used for AGE "
+        "(30m, 12h, 7d, 2w)",
+    )
+    add_dry_run(close)
+    add_json(close)
 
     dedupe = sub.add_parser(
         "dedupe",
         help="close tabs showing the same page as another, keeping one",
     )
-    dedupe.add_argument(
-        "-n",
-        "--dry-run",
-        action="store_true",
-        help="only say what it would do",
-    )
+    add_dry_run(dedupe)
     add_json(dedupe)
 
     edit = sub.add_parser(
@@ -100,12 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="rules file (default $XDG_CONFIG_HOME/tabctl/groups.toml)",
     )
-    apply.add_argument(
-        "-n",
-        "--dry-run",
-        action="store_true",
-        help="only say what it would do",
-    )
+    add_dry_run(apply)
     add_json(apply)
 
     # Firefox runs the host with the manifest's path and the
@@ -118,6 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
 def add_json(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--json", action="store_true", help="print the result as JSON"
+    )
+
+
+def add_dry_run(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="only say what it would do",
     )
 
 
@@ -185,7 +196,7 @@ def run_command(args: argparse.Namespace, socket_path: Path) -> int:
     elif args.command == "ungroup":
         ask("ungroup", {"tabIds": args.tab_ids})
     elif args.command == "close":
-        ask("close", {"tabIds": args.tab_ids})
+        return close_tabs(args, ask)
     elif args.command == "dedupe":
         return close_duplicates(args, ask)
     elif args.command == "edit-group":
@@ -214,6 +225,43 @@ def apply_rules(args: argparse.Namespace, ask) -> int:
     }
     text = "\n".join(lines) if lines else "nothing to do"
     emit(args, record, text)
+    return 0
+
+
+def close_tabs(args: argparse.Namespace, ask) -> int:
+    if args.older_than is not None:
+        if args.tab_ids:
+            raise ValueError("close takes tab ids or --older-than, not both")
+        return close_stale(args, ask)
+    if not args.tab_ids:
+        raise ValueError("close takes tab ids or --older-than AGE")
+    if args.dry_run or args.json:
+        raise ValueError("--dry-run and --json go with --older-than")
+    ask("close", {"tabIds": args.tab_ids})
+    return 0
+
+
+def close_stale(args: argparse.Namespace, ask) -> int:
+    age_s = parse_age(args.older_than)
+    listing = parse_listing(ask("list", {}))
+    now_ms = time.time_ns() // 1_000_000
+    stale = find_stale_tabs(listing, cutoff_ms=now_ms - age_s * 1000)
+    if stale and not args.dry_run:
+        ask("close", {"tabIds": [t.id for t in stale]})
+    lines = [
+        f"close {t.id:>4} "
+        f"(unused {format_age((now_ms - t.last_accessed) / 1000)}) "
+        f"{t.title}  {t.url}"
+        for t in stale
+    ]
+    record = {
+        "applied": not args.dry_run,
+        "closures": [
+            {"tabId": t.id, "lastAccessed": t.last_accessed} for t in stale
+        ],
+    }
+    nothing = f"no tab unused for {args.older_than}"
+    emit(args, record, "\n".join(lines) if lines else nothing)
     return 0
 
 

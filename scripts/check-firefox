@@ -144,6 +144,7 @@ def run_checks(env: dict, base: str) -> None:
     b, _ = check_groups(env, base)
     check_rules(env, base)
     check_close_and_dedupe(env, base, b)
+    check_stale(env, base)
     check_idle(env)
     print(tabctl(env, "ls"))
 
@@ -255,6 +256,23 @@ def check_close_and_dedupe(env: dict, base: str, b: int) -> None:
     assert b not in ids and twin["tab"]["id"] in ids, ids
     assert tabctl(env, "dedupe") == "no duplicates"
     print("ok: close, and dedupe keeps the active tab")
+
+
+def check_stale(env: dict, base: str) -> None:
+    """close --older-than takes a tab left long enough ago, not one
+    left just now nor the one on show."""
+    old = tabctl(env, "open", f"{base}/stale/old", "--json")["tab"]["id"]
+    left = tabctl(env, "open", f"{base}/stale/left", "--json")["tab"]["id"]
+    time.sleep(3)
+    shown = tabctl(env, "open", f"{base}/stale/shown", "--json")["tab"]["id"]
+    plan = tabctl(env, "close", "--older-than", "2s", "--dry-run", "--json")
+    closing = {c["tabId"] for c in plan["closures"]}
+    assert not plan["applied"] and old in closing, plan
+    assert left not in closing and shown not in closing, plan
+    tabctl(env, "close", "--older-than", "2s")
+    ids = {t["id"] for t in tabctl(env, "ls", "--json")["tabs"]}
+    assert old not in ids and {left, shown} <= ids, ids
+    print("ok: close --older-than closes tabs left before the cutoff")
 
 
 def check_idle(env: dict) -> None:
