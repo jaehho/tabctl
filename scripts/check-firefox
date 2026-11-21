@@ -143,6 +143,7 @@ def run_checks(env: dict, base: str) -> None:
     check_open(env, base)
     b, _ = check_groups(env, base)
     check_rules(env, base)
+    check_auto(env, base)
     check_close_and_dedupe(env, base, b)
     check_idle(env)
     print(tabctl(env, "ls"))
@@ -237,6 +238,72 @@ def check_rules(env: dict, base: str) -> None:
     print(
         "ok: apply sorts tabs into the rules' groups, then has nothing to do"
     )
+
+
+def group_title(env: dict, tab_id: int) -> str | None:
+    """The title of tab_id's group, None when it is in none."""
+    listing = tabctl(env, "ls", "--json")
+    titles = {g["id"]: g["title"] for g in listing["groups"]}
+    tab = next(t for t in listing["tabs"] if t["id"] == tab_id)
+    return titles.get(tab["groupId"])
+
+
+def check_auto(env: dict, base: str) -> None:
+    """A tab opened at a rule's address joins its group by itself, and
+    the host reads the rules file again each time."""
+    new = tabctl(env, "open", f"{base}/docs/new", "--json")["tab"]["id"]
+    wait_for(
+        "a new docs tab to join docs",
+        lambda: group_title(env, new) == "docs",
+        10,
+    )
+    rules = Path(env["XDG_CONFIG_HOME"]) / "tabctl" / "groups.toml"
+    rules.write_text(
+        rules.read_text()
+        + f'\n[[group]]\ntitle = "papers"\nurls = ["{base}/papers/*"]\n'
+    )
+    paper = tabctl(env, "open", f"{base}/papers/1", "--json")["tab"]["id"]
+    wait_for(
+        "a papers group for a papers tab",
+        lambda: group_title(env, paper) == "papers",
+        10,
+    )
+    other = tabctl(env, "open", f"{base}/elsewhere", "--json")["tab"]["id"]
+    time.sleep(1)
+    assert group_title(env, other) is None, tabctl(env, "ls")
+    print("ok: a tab opened at a rule's address joins or makes its group")
+    check_auto_burst(env, base, rules)
+
+
+def check_auto_burst(env: dict, base: str, rules: Path) -> None:
+    """Tabs for a group that is not there yet, opened at once, make one
+    group between them."""
+    rules.write_text(
+        rules.read_text()
+        + f'\n[[group]]\ntitle = "burst"\nurls = ["{base}/burst/*"]\n'
+    )
+    url = f"{base}/burst/{{}}"
+    opened = [
+        subprocess.Popen(
+            [ROOT / "scripts" / "tabctl-live", "open", url.format(n), "--new"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+        )
+        for n in range(4)
+    ]
+    for proc in opened:
+        assert proc.wait(20) == 0
+
+    def burst_groups() -> list[int]:
+        listing = tabctl(env, "ls", "--json")
+        ids = {g["id"] for g in listing["groups"] if g["title"] == "burst"}
+        tabs = [t for t in listing["tabs"] if "/burst/" in t["url"]]
+        grouped = all(t["groupId"] in ids for t in tabs) and len(tabs) == 4
+        return sorted(ids) if grouped else []
+
+    wait_for("four burst tabs in a burst group", burst_groups, 10)
+    assert len(burst_groups()) == 1, tabctl(env, "ls")
+    print("ok: four tabs opened at once for a new group make one group")
 
 
 def check_close_and_dedupe(env: dict, base: str, b: int) -> None:

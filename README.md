@@ -46,7 +46,7 @@ tabctl ls --json | jq '.tabs[] | select(.url | startswith("https://github.com/")
 
 ### Rules
 
-`tabctl apply` reads `$XDG_CONFIG_HOME/tabctl/groups.toml` (or the file `--rules` names):
+Tabs sort themselves into groups by the rules in `$XDG_CONFIG_HOME/tabctl/groups.toml`:
 
 ```toml
 [[group]]
@@ -61,11 +61,15 @@ collapsed = true          # only when the group is made
 urls = ["https://docs.*", "https://*.readthedocs.io/*"]
 ```
 
-`urls` are shell-style patterns (`*`, `?`, `[...]`) matched against a tab's whole address, and a tab goes to the first rule it matches. In each window, `apply` puts the ungrouped, unpinned tabs a rule matches into that window's group of the rule's title, making the group when there is none, and gives an existing group the rule's color. A tab already in a group, or pinned, stays where it is.
+`urls` are shell-style patterns (`*`, `?`, `[...]`) matched against a tab's whole address, and a tab goes to the first rule it matches. Whenever a tab's address changes (it opens, you follow a link, a page rewrites its address), a tab that is in no group and not pinned goes into its window's group of the rule's title, made when there is none. A tab already in a group, or pinned, stays where it is, so a tab you take out of a group stays out until its address changes again. The file is read each time, so an edit counts from the next change.
+
+`tabctl apply` does the same for every tab open, such as those open before you wrote a rule (`--rules FILE` reads another file), and also gives each existing group its rule's color, which the automatic sorting leaves alone.
 
 ## How it works
 
 When the extension starts it connects to the native host `dev.jaeho.tabctl` (`tabctl native-host`, `src/tabctl/host.py`), which Firefox starts and keeps while the connection is open, and reconnects with a growing delay if it closes. The host listens on `$XDG_RUNTIME_DIR/tabctl/host.sock`, readable by this user only. Each `tabctl` call sends one JSON request line there; the host passes it to the extension (`extension/background.js`) with an id and returns the extension's reply. Replies wait up to 4 s, and the command up to 6 s.
+
+The extension also tells the host each time a tab's address changes. The host reads the rules, asks the extension for the tabs and groups, and asks it to group the tabs that moved, one batch at a time, so tabs that open together for a group that is not there yet make one group. If the rules file is broken, the host writes why to Firefox's standard error and leaves the tabs be; `tabctl apply` shows the same error.
 
 Only one host runs per user: a second Firefox profile with the extension gets no host of its own.
 

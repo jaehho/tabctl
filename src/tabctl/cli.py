@@ -18,13 +18,13 @@ from tabctl.model import (
     parse_group,
     parse_listing,
 )
-from tabctl.rules import describe_step, plan_steps, read_rules, step_request
-
-
-def default_rules_path(environ) -> Path:
-    """$XDG_CONFIG_HOME/tabctl/groups.toml, or under ~/.config."""
-    config = environ.get("XDG_CONFIG_HOME") or Path("~/.config").expanduser()
-    return Path(config) / "tabctl" / "groups.toml"
+from tabctl.rules import (
+    default_rules_path,
+    describe_step,
+    plan_steps,
+    read_rules,
+    step_request,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,7 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "native-host":
         try:
-            asyncio.run(run_host(find_socket(os.environ)))
+            asyncio.run(
+                run_host(
+                    find_socket(os.environ),
+                    rules_path=default_rules_path(os.environ),
+                )
+            )
         except HostRunningError as error:
             print(f"tabctl native-host: {error}", file=sys.stderr)
             return 1
